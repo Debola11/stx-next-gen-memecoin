@@ -178,3 +178,68 @@
   }
 )
 
+
+;; Governance Proposal with Block Height
+(define-public (create-governance-proposal 
+  (description (string-utf8 200))
+  (voting-period uint)
+)
+  (let 
+    (
+      ;; Current block height
+      (current-block (var-get current-block-height))
+
+      ;; Calculate voting deadline
+      (voting-deadline (+ current-block voting-period))
+
+      ;; Generate proposal ID
+      (proposal-id (var-get next-proposal-id))
+    )
+    ;; Create proposal with explicit block height tracking
+    (map-set governance-proposals 
+      {proposal-id: proposal-id}
+      {
+        proposer: tx-sender,
+        description: description,
+        votes-for: u0,
+        votes-against: u0,
+        is-active: true,
+        proposal-block: current-block,
+        voting-deadline: voting-deadline
+      }
+    )
+
+    ;; Increment proposal ID
+    (var-set next-proposal-id (+ proposal-id u1))
+
+    (ok proposal-id)
+  )
+)
+
+;; Vote on Proposal with Block Height Check
+(define-public (vote-on-proposal 
+  (proposal-id uint)
+)
+  (let 
+    (
+      ;; Current block height
+      (current-block (var-get current-block-height))
+
+      ;; Retrieve proposal information
+      (proposal 
+        (unwrap! 
+          (map-get? governance-proposals {proposal-id: proposal-id}) 
+          (err u113)
+        )
+      )
+    )
+    ;; Check if voting is still open based on block height
+    (asserts! 
+      (< current-block (get voting-deadline proposal)) 
+      (err u114)
+    )
+
+    ;; Additional voting logic here
+    (ok true)
+  )
+)
