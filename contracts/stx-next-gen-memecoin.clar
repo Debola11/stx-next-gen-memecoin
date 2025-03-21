@@ -1,6 +1,3 @@
-
-
-
 ;; Ultra Advanced Memecoin Token Contract
 ;; With Manual Block Height Handling
 
@@ -240,6 +237,107 @@
     )
 
     ;; Additional voting logic here
+    (ok true)
+  )
+)
+
+
+;;  Mint new tokens (owner only)
+(define-public (mint-tokens 
+  (amount uint) 
+  (recipient principal)
+)
+  (begin
+    ;; Check that caller is contract owner
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+
+    ;; Check that minting won't exceed max supply
+    (asserts! 
+      (<= (+ (var-get total-supply) amount) (var-get max-supply))
+      ERR-MAX-SUPPLY-REACHED
+    )
+
+    ;; Mint tokens to recipient
+    (try! (ft-mint? memecoin amount recipient))
+
+    ;; Update total supply
+    (var-set total-supply (+ (var-get total-supply) amount))
+
+    (ok true)
+  )
+)
+
+;;  Token burning mechanism
+(define-public (burn-tokens 
+  (amount uint)
+)
+  (begin
+    ;; Burn tokens from sender
+    (try! (ft-burn? memecoin amount tx-sender))
+
+    ;; Update total supply
+    (var-set total-supply (- (var-get total-supply) amount))
+
+    (ok true)
+  )
+)
+
+
+
+
+;;  Time-locked token vesting mechanism
+;; Define the vesting schedules map
+(define-map vesting-schedules
+  principal
+  {
+    total-amount: uint,
+    claimed-amount: uint,
+    start-block: uint,
+    cliff-block: uint,
+    end-block: uint
+  }
+)
+
+;; Create a new vesting schedule for a beneficiary
+(define-public (create-vesting-schedule
+  (beneficiary principal)
+  (amount uint)
+  (cliff-period uint)
+  (vesting-duration uint)
+)
+  (let
+    (
+      (current-block (var-get current-block-height))
+      (cliff-block (+ current-block cliff-period))
+      (end-block (+ current-block vesting-duration))
+    )
+    ;; Check that caller is contract owner
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+
+    ;; Check that we have enough tokens to allocate
+    (asserts! 
+      (<= (+ (var-get total-supply) amount) (var-get max-supply))
+      ERR-MAX-SUPPLY-REACHED
+    )
+
+    ;; Create vesting schedule
+    (map-set vesting-schedules
+      beneficiary
+      {
+        total-amount: amount,
+        claimed-amount: u0,
+        start-block: current-block,
+        cliff-block: cliff-block,
+        end-block: end-block
+      }
+    )
+
+    ;; Mint tokens to contract (held in escrow)
+    (try! (as-contract (ft-mint? memecoin amount (as-contract tx-sender))))
+
+    ;; Update total supply
+    (var-set total-supply (+ (var-get total-supply) amount))
+
     (ok true)
   )
 )
