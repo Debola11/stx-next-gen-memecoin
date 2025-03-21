@@ -341,3 +341,172 @@
     (ok true)
   )
 )
+
+
+;; Claim vested tokens
+(define-public (claim-vested-tokens)
+  (let
+    (
+      (current-block (var-get current-block-height))
+
+      ;; Get vesting schedule
+      (vesting-info
+        (unwrap!
+          (map-get? vesting-schedules tx-sender)
+          (err u120) ;; No vesting schedule found
+        )
+      )
+
+      ;; Calculate claimable amount
+      (claimable-amount
+        (if (< current-block (get cliff-block vesting-info))
+          ;; Before cliff, nothing is claimable
+          u0
+          (if (>= current-block (get end-block vesting-info))
+            ;; After vesting period, everything is claimable
+            (- (get total-amount vesting-info) (get claimed-amount vesting-info))
+            ;; During vesting period, calculate linear vesting
+            (let
+              (
+                (total-vesting-blocks (- (get end-block vesting-info) (get start-block vesting-info)))
+                (blocks-vested (- current-block (get start-block vesting-info)))
+                (total-vested-amount (/ (* (get total-amount vesting-info) blocks-vested) total-vesting-blocks))
+              )
+              (- total-vested-amount (get claimed-amount vesting-info))
+            )
+          )
+        )
+      )
+    )
+    ;; Check if there's anything to claim
+    (asserts! (> claimable-amount u0) (err u121)) ;; Nothing to claim
+
+    ;; Transfer the claimable tokens to the beneficiary
+    (try!
+      (as-contract
+        (ft-transfer?
+          memecoin
+          claimable-amount
+          (as-contract tx-sender)
+          tx-sender
+        )
+      )
+    )
+
+    ;; Update the claimed amount
+    (map-set vesting-schedules
+      tx-sender
+      (merge
+        vesting-info
+        {claimed-amount: (+ (get claimed-amount vesting-info) claimable-amount)}
+      )
+    )
+
+    (ok claimable-amount)
+  )
+)
+
+;;  Token rewards for stakers based on block duration
+(define-map staking-rewards
+  principal
+  {
+    last-reward-block: uint,
+    reward-rate: uint,  ;; Tokens per 100 blocks per token staked (scaled by 10^6)
+    accumulated-rewards: uint
+  }
+)
+
+;; Set reward rate for a staker (owner only)
+(define-public (set-staking-reward-rate
+  (staker principal)
+  (rate-per-100-blocks uint)
+)
+  (begin
+    ;; Check that caller is contract owner
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+
+    ;; Set or update the reward rate
+    (match (map-get? staking-rewards staker)
+      staker-info (map-set staking-rewards
+                    staker
+                    (merge staker-info 
+                      {
+                        reward-rate: rate-per-100-blocks,
+                        last-reward-block: (var-get current-block-height)
+                      }
+                    )
+                  )
+      ;; If no existing entry, create a new one
+      (map-set staking-rewards
+        staker
+        {
+          last-reward-block: (var-get current-block-height),
+          reward-rate: rate-per-100-blocks,
+          accumulated-rewards: u0
+        }
+      )
+    )
+
+    (ok true)
+  )
+)
+
+;; Calculate and claim staking rewards
+(define-public (calculate-and-claim-staking-rewards)
+  (let
+    (
+      (current-block (var-get current-block-height))
+
+      ;; Get stake info
+      (stake-info
+        (default-to
+          {amount: u0, stake-block: u0, unlock-block: u0}
+          (map-get? staking-deposits tx-sender)
+        )
+      )
+
+      ;; Get reward info
+      (reward-info
+        (default-to
+          {last-reward-block: current-block, reward-rate: u0, accumulated-rewards: u0}
+          (map-get? staking-rewards tx-sender)
+        )
+      )
+
+      ;; Calculate blocks since last reward
+      (blocks-since-last-reward (- current-block (get last-reward-block reward-info)))
+
+      ;; Calculate new rewards (if staked and has reward rate)
+      (new-rewards 
+        (if (and (> (get amount stake-info) u0) (> (get reward-rate reward-info) u0))
+          ;; Calculate: staked amount * blocks * rate / 100 blocks / 10^6 (scaling factor)
+          (/ (* (* (get amount stake-info) blocks-since-last-reward) (get reward-rate reward-info)) u100000000)
+          u0
+        )
+      )
+
+      ;; Total claimable rewards
+      (total-rewards (+ (get accumulated-rewards reward-info) new-rewards))
+    )
+    ;; Check if there are rewards to claim
+    (asserts! (> total-rewards u0) (err u130)) ;; No rewards to claim
+
+    ;; Mint reward tokens to the staker
+    (try! (ft-mint? memecoin total-rewards tx-sender))
+
+    ;; Update total supply
+    (var-set total-supply (+ (var-get total-supply) total-rewards))
+
+    ;; Update reward info
+    (map-set staking-rewards
+      tx-sender
+      {
+        last-reward-block: current-block,
+        reward-rate: (get reward-rate reward-info),
+        accumulated-rewards: u0
+      }
+    )
+
+    (ok total-rewards)
+  )
+)
